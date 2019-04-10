@@ -4,11 +4,12 @@ namespace Drupal\relaxed;
 
 use Doctrine\CouchDB\CouchDBClient;
 use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Site\Settings;
+use Drupal\Core\StringTranslation\StringTranslationTrait;
 use Drupal\Core\Url;
 use Drupal\multiversion\Entity\WorkspaceInterface;
 use Drupal\relaxed\Event\RelaxedEvents;
 use Drupal\relaxed\Event\RelaxedReplicationFinishedEvent;
-use Drupal\relaxed\SensitiveDataTransformer;
 use Drupal\relaxed\Entity\RemoteInterface;
 use Drupal\replication\Entity\ReplicationLog;
 use Drupal\replication\Entity\ReplicationLogInterface;
@@ -22,6 +23,8 @@ use Symfony\Component\Validator\Exception\UnexpectedTypeException;
 
 class CouchdbReplicator implements ReplicatorInterface{
 
+  use StringTranslationTrait;
+
   /**
    * Relaxed configuration settings.
    */
@@ -30,7 +33,7 @@ class CouchdbReplicator implements ReplicatorInterface{
   /**
    * Relaxed sensitive data transformer service.
    *
-   * @var Drupal\relaxed\SensitiveDataTransformer
+   * @var \Drupal\relaxed\SensitiveDataTransformer
    */
   protected $transformer;
 
@@ -43,6 +46,14 @@ class CouchdbReplicator implements ReplicatorInterface{
    * {@inheritDoc}
    */
   public function applies(WorkspacePointerInterface $source, WorkspacePointerInterface $target) {
+    if (empty($source->get('remote_pointer')->target_id)
+      && empty($source->get('remote_database')->value)
+      && empty($target->get('remote_pointer')->target_id)
+      && empty($target->get('remote_database')->value)) {
+      // When both the source and target don't have remote pointers and remote
+      // databases, don't apply this replicator.
+      return FALSE;
+    }
     if ($this->setupEndpoint($source) && $this->setupEndpoint($target)) {
       return TRUE;
     }
@@ -94,10 +105,12 @@ class CouchdbReplicator implements ReplicatorInterface{
         $log = reset($replication_logs);
         if (empty($log)) {
           $log = $this->errorReplicationLog($source, $target, $task);
+          $log->history->fail_info = $this->t('The replication returned a session ID but an existing replication log could not be found.');
         }
       }
       else {
         $log = $this->errorReplicationLog($source, $target, $task);
+        $log->history->fail_info = $this->t('The replication have not returned a session ID.');
       }
 
       $this->dispatchReplicationFinishedEvent($source, $target, $log);
@@ -106,6 +119,7 @@ class CouchdbReplicator implements ReplicatorInterface{
     catch (\Exception $e) {
       watchdog_exception('Relaxed', $e);
       $log = $this->errorReplicationLog($source, $target, $task);
+      $log->history->fail_info = $e->getMessage();
       $this->dispatchReplicationFinishedEvent($source, $target, $log);
       return $log;
     }
@@ -147,10 +161,17 @@ class CouchdbReplicator implements ReplicatorInterface{
         $port = ($uri->getScheme() == 'https') ? 443 : 80;
       }
 
+      $verify = TRUE;
+      // If the self signed certificates are allowed then verify value should
+      // be FALSE.
+      if (Settings::get('allow_self_signed_certificates', FALSE)) {
+        $verify = FALSE;
+      }
       return CouchDBClient::create([
         'url' => (string) $uri,
         'port' => $port,
-        'timeout' => 10
+        'timeout' => 10,
+        'verify' => $verify,
       ]);
     }
   }
